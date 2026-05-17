@@ -5,10 +5,13 @@ import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 import requests
+from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 from historical_charts import prepare_chart_data
 
+
+load_dotenv()
 
 ASKEDGAR_API_KEY = os.environ.get("ASKEDGAR_API_KEY", "")
 ASKEDGAR_BASE = "https://eapi.askedgar.io"

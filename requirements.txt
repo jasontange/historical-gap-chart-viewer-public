@@ -3,4 +3,5 @@ matplotlib
 numpy
 pandas
 polygon-api-client
+python-dotenv
 requests

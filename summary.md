@@ -61,15 +61,20 @@ The chart uses a synthetic/compressed time axis so inactive overnight gaps do no
 
 ## Environment Variables
 
-The app expects API keys to be provided through environment variables:
+The app expects API keys to be provided through environment variables or a local `.env` file:
+
+```text
+ASKEDGAR_API_KEY=your_askedgar_api_key_here
+POLYGON_API_KEY=your_polygon_or_massive_api_key_here
+```
+
+Then run:
 
 ```powershell
-$env:ASKEDGAR_API_KEY="your_askedgar_api_key_here"
-$env:POLYGON_API_KEY="your_polygon_or_massive_api_key_here"
 python app.py
 ```
 
-`MASSIVE_API_KEY` can be used instead of `POLYGON_API_KEY`.
+`MASSIVE_API_KEY` can be used instead of `POLYGON_API_KEY`. The real `.env` file is ignored by git.
 
 ## Local App URL
 

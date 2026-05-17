@@ -8,6 +8,10 @@ from polygon import RESTClient
 import matplotlib.dates as mdates
 import json
 import os
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY") or os.environ.get("MASSIVE_API_KEY", "")
 
