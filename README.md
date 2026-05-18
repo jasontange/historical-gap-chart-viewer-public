@@ -1,5 +1,13 @@
 # Historical Gap Chart Viewer
 
+## Cost And API Usage Disclaimer
+
+This project has not been fully tested for daily production usage, so the ongoing API cost is not yet known.
+
+Caching has not been added yet. If you use this app regularly, add caching before relying on it so you do not waste AskEdgar API calls on data you have already fetched.
+
+The current version uses AskEdgar's more expensive `news` endpoint because it supports date range filtering. AskEdgar plans to add date range filtering to the much cheaper `news-basic` endpoint during the week of May 18, 2026. Once that is available, this repo should be updated to use `news-basic` instead.
+
 Local Flask app for reviewing AskEdgar gap days and loading an interactive historical intraday chart for each date.
 
 ## Setup
