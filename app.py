@@ -241,7 +241,7 @@ def news():
 
     try:
         response = requests.get(
-            f"{ASKEDGAR_BASE}/v1/news",
+            f"{ASKEDGAR_BASE}/v1/news-basic",
             params=params,
             headers={"API-KEY": ASKEDGAR_API_KEY},
             timeout=30,
