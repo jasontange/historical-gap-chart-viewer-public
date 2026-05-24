@@ -9,5 +9,7 @@ venv/
 *.pdf
 *-tradingview.html
 
+cache.db
+
 .DS_Store
 Thumbs.db

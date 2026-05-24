@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gap Day Chart Viewer</title>
+  <title>Historical Chart Viewer</title>
   <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   <style>
     * { box-sizing: border-box; }
@@ -211,6 +211,33 @@
     .dilution-row .val.green { color: #00e676; }
     .dilution-row .val.orange { color: #ff9100; }
 
+    /* Tabs */
+    .tab-bar {
+      display: flex;
+      gap: 0;
+      background: #16213e;
+      border-bottom: 1px solid #2a2a4a;
+    }
+    .tab-bar button {
+      flex: 1;
+      padding: 8px 0;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border: none;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: #888;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-bar button:hover { color: #ccc; }
+    .tab-bar button.active {
+      color: #00d4aa;
+      border-bottom-color: #00d4aa;
+    }
+
     /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #1a1a2e; }
@@ -224,12 +251,17 @@
       <label for="ticker">Ticker</label>
       <input id="ticker" name="ticker" placeholder="e.g. TDIC" autocomplete="off">
     </div>
-    <button id="load-button" type="submit">Load Gaps</button>
+    <button id="load-button" type="submit">Load</button>
     <div class="status" id="status"></div>
   </form>
 
   <div class="main-content">
     <div class="left-panel">
+      <div class="tab-bar" id="tab-bar">
+        <button class="active" data-tab="gaps">Gaps</button>
+        <button data-tab="premarket">Premarket Movers</button>
+        <button data-tab="afterhours">Afterhours Movers</button>
+      </div>
       <section class="chart-shell">
         <div class="chart-title" id="chart-title">Search a ticker to begin</div>
         <div id="chart">
@@ -243,16 +275,16 @@
 
     <div class="right-panel">
       <div class="edgar-section">
-        <h3>Dilution Rating (as of gap date)</h3>
-        <div id="dilution-container"><span class="loading-msg">Select a gap day to load dilution data.</span></div>
+        <h3>Dilution Rating (as of selected date)</h3>
+        <div id="dilution-container"><span class="loading-msg">Select a row to load dilution data.</span></div>
       </div>
       <div class="edgar-section">
-        <h3>News &amp; Filings (Gap Day + 3 days prior)</h3>
-        <div id="news-container"><span class="loading-msg">Select a gap day to load news.</span></div>
+        <h3>News &amp; Filings (3 days prior)</h3>
+        <div id="news-container"><span class="loading-msg">Select a row to load news.</span></div>
       </div>
       <div class="edgar-section">
-        <h3>Offerings (&plusmn; 30 days of gap)</h3>
-        <div id="offerings-container"><span class="loading-msg">Select a gap day to load offerings.</span></div>
+        <h3>Offerings (&plusmn; 30 days)</h3>
+        <div id="offerings-container"><span class="loading-msg">Select a row to load offerings.</span></div>
       </div>
     </div>
   </div>
@@ -269,6 +301,8 @@
     const overlayContext = overlay.getContext('2d');
     const newsContainer = document.getElementById('news-container');
     const offeringsContainer = document.getElementById('offerings-container');
+    const dilutionContainer = document.getElementById('dilution-container');
+    const tabBar = document.getElementById('tab-bar');
 
     let chart;
     let candleSeries;
@@ -278,28 +312,64 @@
     let extendedRanges = [];
     let selectedRowEl = null;
     let currentTicker = '';
+    let activeTab = 'gaps';
+
+    const TAB_CONFIG = {
+      gaps:       { api: '/api/gaps',              label: 'Gaps',              emptyMsg: 'No gap days returned.' },
+      premarket:  { api: '/api/premarket-stats',   label: 'Premarket Movers',  emptyMsg: 'No premarket movers returned.' },
+      afterhours: { api: '/api/afterhours-stats',  label: 'Afterhours Movers', emptyMsg: 'No afterhours movers returned.' },
+    };
 
     function setStatus(msg) { statusEl.textContent = msg || ''; }
 
-    // ===== GAP TABLE =====
-    function renderTable(rows, ticker) {
-      if (!rows.length) {
-        tableShell.innerHTML = '<div class="empty">No gap days returned.</div>';
-        return;
-      }
+    function fmtDollarVol(val) {
+      if (val == null) return '';
+      if (val >= 1e6) return '$' + (val / 1e6).toFixed(1) + 'M';
+      if (val >= 1e3) return '$' + (val / 1e3).toFixed(0) + 'K';
+      return '$' + Number(val).toLocaleString();
+    }
 
+    let gapDatesCache = new Set(); // gap dates for the current ticker
+
+    function nextTradingDay(dateStr) {
+      const d = new Date(dateStr + 'T12:00:00');
+      const day = d.getDay(); // 0=Sun..6=Sat
+      // Friday(5) -> Monday(+3), Saturday(6) -> Monday(+2), otherwise +1
+      const add = day === 5 ? 3 : day === 6 ? 2 : 1;
+      d.setDate(d.getDate() + add);
+      return d.toISOString().split('T')[0];
+    }
+
+    // ===== TABS =====
+    tabBar.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-tab]');
+      if (!btn || btn.dataset.tab === activeTab) return;
+      tabBar.querySelector('.active').classList.remove('active');
+      btn.classList.add('active');
+      activeTab = btn.dataset.tab;
+      // Re-load data if we have a ticker
+      if (currentTicker) loadData();
+    });
+
+    // ===== TABLE RENDERERS =====
+    function buildRowClickHandler(tr, ticker) {
+      tr.addEventListener('click', () => {
+        if (!tr.dataset.date) { setStatus('Row missing date.'); return; }
+        if (selectedRowEl) selectedRowEl.classList.remove('selected');
+        selectedRowEl = tr;
+        tr.classList.add('selected');
+        loadChart(ticker, tr.dataset.date);
+        loadEdgarData(ticker, tr.dataset.date);
+      });
+    }
+
+    function renderGapsTable(rows, ticker) {
       const table = document.createElement('table');
       const thead = document.createElement('thead');
       const tbody = document.createElement('tbody');
       thead.innerHTML = `<tr>
-        <th>Date</th>
-        <th>Volume</th>
-        <th>Premarket Vol</th>
-        <th>Gap %</th>
-        <th>Close</th>
-        <th>Over VWAP</th>
-        <th>Filing Types</th>
-        <th>Tags</th>
+        <th>Date</th><th>Volume</th><th>Premarket Vol</th><th>Gap %</th>
+        <th>Close</th><th>Over VWAP</th><th>Filing Types</th><th>Tags</th>
       </tr>`;
 
       rows.forEach((row) => {
@@ -307,25 +377,21 @@
         const chartDate = row._chart_date || row.date || '';
         tr.dataset.date = chartDate;
 
-        // Gap % color
         const gapPct = row.gap_percentage || 0;
         let gapClass = 'orange';
         if (gapPct >= 75) gapClass = 'green';
         else if (gapPct >= 50) gapClass = 'yellow';
 
-        // Close color: red if market_close < market_open, green if above, yellow if even
         const mClose = row.market_close;
         const mOpen = row.market_open;
         let closeClass = 'yellow';
         if (mClose > mOpen) closeClass = 'green';
         else if (mClose < mOpen) closeClass = 'red';
 
-        // VWAP color
         const overVwap = row.closed_over_vwap;
         let vwapClass = overVwap ? 'green' : 'red';
         let vwapText = overVwap ? 'Yes' : 'No';
 
-        // Filing types & tags
         const filingTypes = Array.isArray(row.filing_types) ? row.filing_types.join(', ') : (row.filing_types || '');
         const tags = Array.isArray(row.all_tags) ? row.all_tags.join(', ') : (row.all_tags || '');
 
@@ -337,29 +403,133 @@
           <td class="${closeClass}">$${mClose ? Number(mClose).toFixed(2) : 'N/A'}</td>
           <td class="${vwapClass}">${vwapText}</td>
           <td>${filingTypes}</td>
-          <td>${tags}</td>
-        `;
+          <td>${tags}</td>`;
 
-        tr.addEventListener('click', () => {
-          if (!tr.dataset.date) {
-            setStatus('Row missing date.');
-            return;
-          }
-          if (selectedRowEl) selectedRowEl.classList.remove('selected');
-          selectedRowEl = tr;
-          tr.classList.add('selected');
-          loadChart(ticker, tr.dataset.date);
-          loadEdgarData(ticker, tr.dataset.date);
-        });
+        buildRowClickHandler(tr, ticker);
         tbody.appendChild(tr);
       });
 
       table.appendChild(thead);
       table.appendChild(tbody);
-      tableShell.replaceChildren(table);
+      return { table, tbody };
+    }
 
-      // Auto-click first row
-      const firstRow = tbody.querySelector('tr[data-date]');
+    function renderPremarketTable(rows, ticker) {
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const tbody = document.createElement('tbody');
+      thead.innerHTML = `<tr>
+        <th>Date</th><th>Gain %</th><th>Spike (min)</th><th>PM $ Volume</th>
+        <th>Closed Over VWAP</th><th>Gapped?</th><th>Filing Types</th><th>Tags</th>
+      </tr>`;
+
+      rows.forEach((row) => {
+        const tr = document.createElement('tr');
+        const chartDate = row._chart_date || row.date || '';
+        tr.dataset.date = chartDate;
+
+        const gain = row.percentage_gain || 0;
+        let gainClass = gain > 0 ? 'green' : (gain < 0 ? 'red' : '');
+
+        const mOpen = row.market_open;
+        const pmVwap = row.premarket_vwap;
+        let vwapClass = '';
+        let vwapText = 'N/A';
+        if (mOpen != null && pmVwap != null) {
+          vwapClass = mOpen >= pmVwap ? 'green' : 'red';
+          vwapText = mOpen >= pmVwap ? 'Yes' : 'No';
+        }
+
+        // Premarket date matches gap date directly
+        const gapped = chartDate && gapDatesCache.has(chartDate);
+
+        const filingTypes = Array.isArray(row.filing_types) ? row.filing_types.join(', ') : (row.filing_types || '');
+        const tags = Array.isArray(row.all_tags) ? row.all_tags.join(', ') : (row.all_tags || '');
+
+        tr.innerHTML = `
+          <td>${chartDate}</td>
+          <td class="${gainClass}">${gain.toFixed(2)}%</td>
+          <td>${row.spike_duration_minutes != null ? row.spike_duration_minutes : ''}</td>
+          <td>${fmtDollarVol(row.premarket_dollar_volume)}</td>
+          <td class="${vwapClass}">${vwapText}</td>
+          <td class="${gapped ? 'green' : ''}">${gapped ? 'Yes' : 'No'}</td>
+          <td>${filingTypes}</td>
+          <td>${tags}</td>`;
+
+        buildRowClickHandler(tr, ticker);
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      return { table, tbody };
+    }
+
+    function renderAfterhoursTable(rows, ticker) {
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const tbody = document.createElement('tbody');
+      thead.innerHTML = `<tr>
+        <th>Date</th><th>Gain %</th><th>Spike (min)</th><th>AH $ Volume</th>
+        <th>Closed Over VWAP</th><th>Gapped?</th><th>Filing Types</th><th>Tags</th>
+      </tr>`;
+
+      rows.forEach((row) => {
+        const tr = document.createElement('tr');
+        const chartDate = row._chart_date || row.date || '';
+        tr.dataset.date = chartDate;
+
+        const gain = row.percentage_gain || 0;
+        let gainClass = gain > 0 ? 'green' : (gain < 0 ? 'red' : '');
+
+        const ahClose = row.afterhours_close;
+        const ahVwap = row.afterhours_vwap;
+        let vwapClass = '';
+        let vwapText = 'N/A';
+        if (ahClose != null && ahVwap != null) {
+          vwapClass = ahClose >= ahVwap ? 'green' : 'red';
+          vwapText = ahClose >= ahVwap ? 'Yes' : 'No';
+        }
+
+        // AH move on day X → gap would show on the next trading day
+        const gapped = chartDate && gapDatesCache.has(nextTradingDay(chartDate));
+
+        const filingTypes = Array.isArray(row.filing_types) ? row.filing_types.join(', ') : (row.filing_types || '');
+        const tags = Array.isArray(row.all_tags) ? row.all_tags.join(', ') : (row.all_tags || '');
+
+        tr.innerHTML = `
+          <td>${chartDate}</td>
+          <td class="${gainClass}">${gain.toFixed(2)}%</td>
+          <td>${row.spike_duration_minutes != null ? row.spike_duration_minutes : ''}</td>
+          <td>${fmtDollarVol(row.afterhours_dollar_volume)}</td>
+          <td class="${vwapClass}">${vwapText}</td>
+          <td class="${gapped ? 'green' : ''}">${gapped ? 'Yes' : 'No'}</td>
+          <td>${filingTypes}</td>
+          <td>${tags}</td>`;
+
+        buildRowClickHandler(tr, ticker);
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      return { table, tbody };
+    }
+
+    function renderTable(rows, ticker) {
+      const config = TAB_CONFIG[activeTab];
+      if (!rows.length) {
+        tableShell.innerHTML = `<div class="empty">${config.emptyMsg}</div>`;
+        return;
+      }
+
+      let result;
+      if (activeTab === 'premarket') result = renderPremarketTable(rows, ticker);
+      else if (activeTab === 'afterhours') result = renderAfterhoursTable(rows, ticker);
+      else result = renderGapsTable(rows, ticker);
+
+      tableShell.replaceChildren(result.table);
+      const firstRow = result.tbody.querySelector('tr[data-date]');
       if (firstRow) firstRow.click();
     }
 
@@ -477,18 +647,16 @@
     }
 
     // ===== EDGAR DATA =====
-    const dilutionContainer = document.getElementById('dilution-container');
-
-    async function loadEdgarData(ticker, gapDate) {
-      loadDilution(ticker, gapDate);
-      loadNews(ticker, gapDate);
-      loadOfferings(ticker, gapDate);
+    async function loadEdgarData(ticker, selectedDate) {
+      loadDilution(ticker, selectedDate);
+      loadNews(ticker, selectedDate);
+      loadOfferings(ticker, selectedDate);
     }
 
-    async function loadDilution(ticker, gapDate) {
+    async function loadDilution(ticker, selectedDate) {
       dilutionContainer.innerHTML = '<span class="loading-msg">Loading dilution data...</span>';
       try {
-        const resp = await fetch(`/api/dilution?ticker=${encodeURIComponent(ticker)}&date=${encodeURIComponent(gapDate)}`);
+        const resp = await fetch(`/api/dilution?ticker=${encodeURIComponent(ticker)}&date=${encodeURIComponent(selectedDate)}`);
         const json = await resp.json();
         if (!resp.ok) throw new Error(json.error || 'Failed');
 
@@ -536,15 +704,15 @@
       }
     }
 
-    async function loadNews(ticker, gapDate) {
+    async function loadNews(ticker, selectedDate) {
       newsContainer.innerHTML = '<span class="loading-msg">Loading news...</span>';
-      const gapD = new Date(gapDate + 'T00:00:00');
-      const startD = new Date(gapD);
+      const d = new Date(selectedDate + 'T00:00:00');
+      const startD = new Date(d);
       startD.setDate(startD.getDate() - 3);
       const fromStr = startD.toISOString().split('T')[0];
 
       try {
-        const resp = await fetch(`/api/news?ticker=${encodeURIComponent(ticker)}&date_from=${fromStr}&date_to=${encodeURIComponent(gapDate)}`);
+        const resp = await fetch(`/api/news?ticker=${encodeURIComponent(ticker)}&date_from=${fromStr}&date_to=${encodeURIComponent(selectedDate)}`);
         const json = await resp.json();
         if (!resp.ok) throw new Error(json.error || 'Failed');
 
@@ -570,12 +738,12 @@
       }
     }
 
-    async function loadOfferings(ticker, gapDate) {
+    async function loadOfferings(ticker, selectedDate) {
       offeringsContainer.innerHTML = '<span class="loading-msg">Loading offerings...</span>';
-      const gapD = new Date(gapDate + 'T00:00:00');
-      const dateFrom = new Date(gapD);
+      const d = new Date(selectedDate + 'T00:00:00');
+      const dateFrom = new Date(d);
       dateFrom.setDate(dateFrom.getDate() - 30);
-      const dateTo = new Date(gapD);
+      const dateTo = new Date(d);
       dateTo.setDate(dateTo.getDate() + 30);
       const fromStr = dateFrom.toISOString().split('T')[0];
       const toStr = dateTo.toISOString().split('T')[0];
@@ -612,30 +780,56 @@
       }
     }
 
-    // ===== LOAD GAPS =====
-    async function loadGaps(event) {
-      event.preventDefault();
+    // ===== LOAD DATA =====
+    async function loadData(event) {
+      if (event) event.preventDefault();
       const ticker = tickerInput.value.trim().toUpperCase();
       if (!ticker) return;
       currentTicker = ticker;
 
+      const config = TAB_CONFIG[activeTab];
       selectedRowEl = null;
       loadButton.disabled = true;
-      setStatus(`Loading gap stats for ${ticker}...`);
-      tableShell.innerHTML = '<div class="empty">Loading gap days...</div>';
-      newsContainer.innerHTML = '<span class="loading-msg">Select a gap day to load news.</span>';
-      offeringsContainer.innerHTML = '<span class="loading-msg">Select a gap day to load offerings.</span>';
+      setStatus(`Loading ${config.label.toLowerCase()} for ${ticker}...`);
+      tableShell.innerHTML = `<div class="empty">Loading ${config.label.toLowerCase()}...</div>`;
+      newsContainer.innerHTML = '<span class="loading-msg">Select a row to load news.</span>';
+      offeringsContainer.innerHTML = '<span class="loading-msg">Select a row to load offerings.</span>';
+      dilutionContainer.innerHTML = '<span class="loading-msg">Select a row to load dilution data.</span>';
 
       try {
-        const resp = await fetch('/api/gaps', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ticker })
-        });
-        const payload = await resp.json();
-        if (!resp.ok) throw new Error(payload.error || 'Could not load gap stats.');
+        // Fetch tab data; also fetch gap dates in parallel for premarket/afterhours
+        const fetches = [
+          fetch(config.api, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticker })
+          })
+        ];
+        if (activeTab !== 'gaps') {
+          fetches.push(
+            fetch('/api/gaps', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ticker })
+            })
+          );
+        }
+        const responses = await Promise.all(fetches);
+        const payload = await responses[0].json();
+        if (!responses[0].ok) throw new Error(payload.error || `Could not load ${config.label.toLowerCase()}.`);
+
+        // Build gap dates set for cross-referencing
+        if (responses[1]) {
+          const gapPayload = await responses[1].json();
+          gapDatesCache = new Set(
+            (gapPayload.rows || []).map(r => r._chart_date || r.date || '').filter(Boolean)
+          );
+        } else {
+          gapDatesCache = new Set();
+        }
+
         renderTable(payload.rows || [], ticker);
-        setStatus(`${(payload.rows || []).length} gaps for ${ticker}`);
+        setStatus(`${(payload.rows || []).length} ${config.label.toLowerCase()} for ${ticker}`);
       } catch (err) {
         tableShell.innerHTML = `<div class="empty">${err.message}</div>`;
         chartTitle.textContent = 'Search a ticker to begin';
@@ -645,7 +839,7 @@
       }
     }
 
-    form.addEventListener('submit', loadGaps);
+    form.addEventListener('submit', loadData);
     window.addEventListener('resize', () => {
       if (!chart) return;
       chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight });

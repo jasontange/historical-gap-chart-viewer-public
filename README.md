@@ -1,12 +1,10 @@
-# Historical Gap Chart Viewer
+# Historical Chart Viewer
+
+Local Flask app for reviewing AskEdgar gap days, premarket movers, and afterhours movers with interactive historical intraday charts.
 
 ## Cost And API Usage Disclaimer
 
-This project has not been fully tested for daily production usage, so the ongoing API cost is not yet known.
-
-Caching has not been added yet. If you use this app regularly, add caching before relying on it so you do not waste AskEdgar API calls on data you have already fetched.
-
-Local Flask app for reviewing AskEdgar gap days and loading an interactive historical intraday chart for each date.
+API responses are cached locally in a SQLite database (`cache.db`). Gap/premarket/afterhours stats are cached for 24 hours; news, dilution, offerings, and chart data are cached permanently (historical data does not change). Delete `cache.db` to force a full refresh.
 
 ## Setup
 
@@ -34,6 +32,7 @@ http://127.0.0.1:5000/
 
 ## Notes
 
-- AskEdgar provides gap-day stats and related company data.
+- AskEdgar provides gap-day stats, premarket/afterhours movers, dilution ratings, news, and offerings data.
 - Polygon/Massive provides intraday OHLCV candles.
 - TradingView Lightweight Charts renders the interactive browser chart.
+- Three tabs: Gaps, Premarket Movers, Afterhours Movers — each with date-based historical chart lookup.

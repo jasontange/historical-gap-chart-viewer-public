@@ -8,6 +8,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
+from cache import cache_get, cache_set, make_key, _24_HOURS
 from historical_charts import prepare_chart_data
 
 
@@ -44,7 +45,7 @@ def extract_row_date(row):
     return None
 
 
-def fetch_all_gap_stats(ticker, limit=100):
+def fetch_all_pages(endpoint, ticker, limit=100):
     if not ASKEDGAR_API_KEY:
         raise ValueError("Missing ASKEDGAR_API_KEY environment variable.")
 
@@ -52,7 +53,7 @@ def fetch_all_gap_stats(ticker, limit=100):
     page = 1
     while True:
         response = requests.get(
-            f"{ASKEDGAR_BASE}/v1/gap-stats",
+            f"{ASKEDGAR_BASE}/v1/{endpoint}",
             params={"ticker": ticker, "page": page, "limit": limit},
             headers={"API-KEY": ASKEDGAR_API_KEY},
             timeout=30,
@@ -176,8 +177,13 @@ def gap_stats():
     if not ticker:
         return jsonify({"error": "Ticker is required."}), 400
 
+    cache_key = make_key("gap-stats", ticker)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
     try:
-        rows, raw_payload = fetch_all_gap_stats(ticker)
+        rows, raw_payload = fetch_all_pages("gap-stats", ticker)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
@@ -185,17 +191,85 @@ def gap_stats():
         if isinstance(row, dict):
             row["_chart_date"] = extract_row_date(row)
 
-    return jsonify(
-        {
-            "ticker": ticker,
-            "rows": rows,
-            "raw": {
-                "status": raw_payload.get("status"),
-                "count": len(rows),
-                "has_more": raw_payload.get("has_more"),
-            },
-        }
-    )
+    result = {
+        "ticker": ticker,
+        "rows": rows,
+        "raw": {
+            "status": raw_payload.get("status"),
+            "count": len(rows),
+            "has_more": raw_payload.get("has_more"),
+        },
+    }
+    cache_set(cache_key, result, ttl=_24_HOURS)
+    return jsonify(result)
+
+
+@app.route("/api/premarket-stats", methods=["GET", "POST"])
+def premarket_stats():
+    payload = request.get_json(silent=True) or {}
+    ticker = normalize_ticker(payload.get("ticker") or request.args.get("ticker"))
+    if not ticker:
+        return jsonify({"error": "Ticker is required."}), 400
+
+    cache_key = make_key("premarket-stats", ticker)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    try:
+        rows, raw_payload = fetch_all_pages("premarket-stats", ticker)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    for row in rows:
+        if isinstance(row, dict):
+            row["_chart_date"] = extract_row_date(row)
+
+    result = {
+        "ticker": ticker,
+        "rows": rows,
+        "raw": {
+            "status": raw_payload.get("status"),
+            "count": len(rows),
+            "has_more": raw_payload.get("has_more"),
+        },
+    }
+    cache_set(cache_key, result, ttl=_24_HOURS)
+    return jsonify(result)
+
+
+@app.route("/api/afterhours-stats", methods=["GET", "POST"])
+def afterhours_stats():
+    payload = request.get_json(silent=True) or {}
+    ticker = normalize_ticker(payload.get("ticker") or request.args.get("ticker"))
+    if not ticker:
+        return jsonify({"error": "Ticker is required."}), 400
+
+    cache_key = make_key("afterhours-stats", ticker)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    try:
+        rows, raw_payload = fetch_all_pages("afterhours-stats", ticker)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    for row in rows:
+        if isinstance(row, dict):
+            row["_chart_date"] = extract_row_date(row)
+
+    result = {
+        "ticker": ticker,
+        "rows": rows,
+        "raw": {
+            "status": raw_payload.get("status"),
+            "count": len(rows),
+            "has_more": raw_payload.get("has_more"),
+        },
+    }
+    cache_set(cache_key, result, ttl=_24_HOURS)
+    return jsonify(result)
 
 
 @app.get("/api/chart")
@@ -206,6 +280,11 @@ def chart():
     if not ticker or not date_value:
         return jsonify({"error": "Ticker and date are required."}), 400
 
+    cache_key = make_key("chart", ticker, date_value[:10], candle_minutes)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
     try:
         chart_date = datetime.strptime(date_value[:10], "%Y-%m-%d").date()
         payload = build_chart_payload(ticker, chart_date, candle_minutes)
@@ -215,6 +294,7 @@ def chart():
     if not payload:
         return jsonify({"error": f"No chart data found for {ticker} on {date_value}."}), 404
 
+    cache_set(cache_key, payload)
     return jsonify(payload)
 
 
@@ -227,6 +307,11 @@ def news():
         return jsonify({"error": "Ticker is required."}), 400
     if not ASKEDGAR_API_KEY:
         return jsonify({"error": "Missing ASKEDGAR_API_KEY environment variable."}), 500
+
+    cache_key = make_key("news-basic", ticker, date_from or "", date_to or "")
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
 
     params = {
         "ticker": ticker,
@@ -247,7 +332,9 @@ def news():
             timeout=30,
         )
         response.raise_for_status()
-        return jsonify(response.json())
+        result = response.json()
+        cache_set(cache_key, result)
+        return jsonify(result)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
@@ -261,9 +348,15 @@ def dilution():
     if not ASKEDGAR_API_KEY:
         return jsonify({"error": "Missing ASKEDGAR_API_KEY environment variable."}), 500
 
-    params = {"ticker": ticker, "limit": 1}
-    if date_val:
-        params["date_to"] = date_val
+    if not date_val:
+        return jsonify({"error": "Date is required."}), 400
+
+    cache_key = make_key("historical-dilution", ticker, date_val)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    params = {"ticker": ticker, "date": date_val, "limit": 1}
 
     try:
         response = requests.get(
@@ -273,7 +366,9 @@ def dilution():
             timeout=30,
         )
         response.raise_for_status()
-        return jsonify(response.json())
+        result = response.json()
+        cache_set(cache_key, result)
+        return jsonify(result)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
@@ -287,6 +382,11 @@ def offerings():
         return jsonify({"error": "Ticker is required."}), 400
     if not ASKEDGAR_API_KEY:
         return jsonify({"error": "Missing ASKEDGAR_API_KEY environment variable."}), 500
+
+    cache_key = make_key("offerings", ticker, date_from or "", date_to or "")
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
 
     params = {"ticker": ticker, "limit": 50}
     if date_from:
@@ -302,7 +402,9 @@ def offerings():
             timeout=30,
         )
         response.raise_for_status()
-        return jsonify(response.json())
+        result = response.json()
+        cache_set(cache_key, result)
+        return jsonify(result)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 
