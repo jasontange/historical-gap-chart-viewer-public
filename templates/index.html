@@ -261,6 +261,7 @@
         <button class="active" data-tab="gaps">Gaps</button>
         <button data-tab="premarket">Premarket Movers</button>
         <button data-tab="afterhours">Afterhours Movers</button>
+        <button data-tab="intraday">Intraday</button>
       </div>
       <section class="chart-shell">
         <div class="chart-title" id="chart-title">Search a ticker to begin</div>
@@ -318,6 +319,7 @@
       gaps:       { api: '/api/gaps',              label: 'Gaps',              emptyMsg: 'No gap days returned.' },
       premarket:  { api: '/api/premarket-stats',   label: 'Premarket Movers',  emptyMsg: 'No premarket movers returned.' },
       afterhours: { api: '/api/afterhours-stats',  label: 'Afterhours Movers', emptyMsg: 'No afterhours movers returned.' },
+      intraday:   { api: '/api/intraday-stats',    label: 'Intraday',          emptyMsg: 'No intraday volume anomalies returned.' },
     };
 
     function setStatus(msg) { statusEl.textContent = msg || ''; }
@@ -516,6 +518,56 @@
       return { table, tbody };
     }
 
+    function renderIntradayTable(rows, ticker) {
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const tbody = document.createElement('tbody');
+      thead.innerHTML = `<tr>
+        <th>Date</th><th>Gap %</th><th>% Gain</th><th>Vol Ratio</th><th>Spike (min)</th>
+        <th>$ Volume</th><th>Faded?</th><th>Filing Types</th><th>Tags</th>
+      </tr>`;
+
+      rows.forEach((row) => {
+        const tr = document.createElement('tr');
+        const chartDate = row._chart_date || row.date || '';
+        tr.dataset.date = chartDate;
+
+        const gap = row.gap_percentage != null ? Number(row.gap_percentage) : null;
+        const gapClass = gap == null ? '' : (gap > 0 ? 'green' : (gap < 0 ? 'red' : ''));
+
+        const gain = row.percentage_gain != null ? Number(row.percentage_gain) : 0;
+        const gainClass = gain > 0 ? 'green' : (gain < 0 ? 'red' : '');
+
+        const ratio = row.daily_volume_ratio != null ? Number(row.daily_volume_ratio) : null;
+        const ratioClass = ratio == null ? '' : (ratio >= 50 ? 'green' : (ratio >= 20 ? 'yellow' : 'orange'));
+
+        const faded = row.close_under_50pct_of_range;
+        const fadedClass = faded === true ? 'red' : (faded === false ? 'green' : '');
+        const fadedText = faded == null ? 'N/A' : (faded ? 'Yes' : 'No');
+
+        const filingTypes = Array.isArray(row.filing_types) ? row.filing_types.join(', ') : (row.filing_types || '');
+        const tags = Array.isArray(row.all_tags) ? row.all_tags.join(', ') : (row.all_tags || '');
+
+        tr.innerHTML = `
+          <td>${chartDate}</td>
+          <td class="${gapClass}">${gap != null ? gap.toFixed(2) + '%' : ''}</td>
+          <td class="${gainClass}">${gain.toFixed(2)}%</td>
+          <td class="${ratioClass}">${ratio != null ? ratio.toFixed(1) + 'x' : ''}</td>
+          <td>${row.spike_duration_minutes != null ? row.spike_duration_minutes : ''}</td>
+          <td>${fmtDollarVol(row.dollar_volume)}</td>
+          <td class="${fadedClass}">${fadedText}</td>
+          <td>${filingTypes}</td>
+          <td>${tags}</td>`;
+
+        buildRowClickHandler(tr, ticker);
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      return { table, tbody };
+    }
+
     function renderTable(rows, ticker) {
       const config = TAB_CONFIG[activeTab];
       if (!rows.length) {
@@ -526,6 +578,7 @@
       let result;
       if (activeTab === 'premarket') result = renderPremarketTable(rows, ticker);
       else if (activeTab === 'afterhours') result = renderAfterhoursTable(rows, ticker);
+      else if (activeTab === 'intraday') result = renderIntradayTable(rows, ticker);
       else result = renderGapsTable(rows, ticker);
 
       tableShell.replaceChildren(result.table);
@@ -626,8 +679,9 @@
 
     async function loadChart(ticker, date) {
       setStatus(`Loading chart for ${ticker} ${date}...`);
+      const sessionParam = activeTab === 'intraday' ? '&session=intraday' : '';
       try {
-        const resp = await fetch(`/api/chart?ticker=${encodeURIComponent(ticker)}&date=${encodeURIComponent(date)}&candleMinutes=3`);
+        const resp = await fetch(`/api/chart?ticker=${encodeURIComponent(ticker)}&date=${encodeURIComponent(date)}&candleMinutes=3${sessionParam}`);
         const payload = await resp.json();
         if (!resp.ok) throw new Error(payload.error || 'Chart load failed.');
 

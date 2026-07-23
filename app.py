@@ -70,12 +70,13 @@ def fetch_all_pages(endpoint, ticker, limit=100):
         page += 1
 
 
-def build_chart_payload(ticker, chart_date, candle_minutes=3):
+def build_chart_payload(ticker, chart_date, candle_minutes=3, include_previous=True):
     data, previous_date = prepare_chart_data(
         ticker,
         chart_date,
         candle_minutes,
         previous_start=time(9, 30),
+        include_previous=include_previous,
     )
     if data.empty:
         return None
@@ -118,15 +119,24 @@ def build_chart_payload(ticker, chart_date, candle_minutes=3):
         nearest_index = int(np.argmin(np.abs(timestamp_nums - session_num)))
         return synthetic_times[nearest_index]
 
-    event_specs = [
-        ("Prev Open", pd.Timestamp(f"{previous_date} 09:30", tz="America/New_York"), "#1f77b4"),
-        ("Prev Close", pd.Timestamp(f"{previous_date} 16:00", tz="America/New_York"), "#777777"),
-        ("AH End", pd.Timestamp(f"{previous_date} 20:00", tz="America/New_York"), "#777777"),
-        ("Premarket", pd.Timestamp(f"{chart_date} 04:00", tz="America/New_York"), "#777777"),
-        ("Open", pd.Timestamp(f"{chart_date} 09:30", tz="America/New_York"), "#1f77b4"),
-        ("Noon", pd.Timestamp(f"{chart_date} 12:00", tz="America/New_York"), "#9467bd"),
-        ("Close", pd.Timestamp(f"{chart_date} 16:00", tz="America/New_York"), "#d62728"),
-    ]
+    if include_previous:
+        event_specs = [
+            ("Prev Open", pd.Timestamp(f"{previous_date} 09:30", tz="America/New_York"), "#1f77b4"),
+            ("Prev Close", pd.Timestamp(f"{previous_date} 16:00", tz="America/New_York"), "#777777"),
+            ("AH End", pd.Timestamp(f"{previous_date} 20:00", tz="America/New_York"), "#777777"),
+            ("Premarket", pd.Timestamp(f"{chart_date} 04:00", tz="America/New_York"), "#777777"),
+            ("Open", pd.Timestamp(f"{chart_date} 09:30", tz="America/New_York"), "#1f77b4"),
+            ("Noon", pd.Timestamp(f"{chart_date} 12:00", tz="America/New_York"), "#9467bd"),
+            ("Close", pd.Timestamp(f"{chart_date} 16:00", tz="America/New_York"), "#d62728"),
+        ]
+    else:
+        event_specs = [
+            ("Premarket", pd.Timestamp(f"{chart_date} 04:00", tz="America/New_York"), "#777777"),
+            ("Open", pd.Timestamp(f"{chart_date} 09:30", tz="America/New_York"), "#1f77b4"),
+            ("Noon", pd.Timestamp(f"{chart_date} 12:00", tz="America/New_York"), "#9467bd"),
+            ("Close", pd.Timestamp(f"{chart_date} 16:00", tz="America/New_York"), "#d62728"),
+            ("AH End", pd.Timestamp(f"{chart_date} 20:00", tz="America/New_York"), "#777777"),
+        ]
     event_lines = [
         {
             "time": nearest_synthetic_time(event_time),
@@ -136,26 +146,31 @@ def build_chart_payload(ticker, chart_date, candle_minutes=3):
         for label, event_time, color in event_specs
     ]
 
-    extended_ranges = [
-        {
+    extended_ranges = []
+    if include_previous:
+        extended_ranges.append({
             "start": nearest_synthetic_time(pd.Timestamp(f"{previous_date} 16:00", tz="America/New_York")),
             "end": nearest_synthetic_time(pd.Timestamp(f"{previous_date} 20:00", tz="America/New_York")),
             "label": "Previous After Hours",
-        },
-        {
-            "start": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 04:00", tz="America/New_York")),
-            "end": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 09:30", tz="America/New_York")),
-            "label": "Premarket",
-        },
-        {
-            "start": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 16:00", tz="America/New_York")),
-            "end": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 20:00", tz="America/New_York")),
-            "label": "After Hours",
-        },
-    ]
+        })
+    extended_ranges.append({
+        "start": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 04:00", tz="America/New_York")),
+        "end": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 09:30", tz="America/New_York")),
+        "label": "Premarket",
+    })
+    extended_ranges.append({
+        "start": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 16:00", tz="America/New_York")),
+        "end": nearest_synthetic_time(pd.Timestamp(f"{chart_date} 20:00", tz="America/New_York")),
+        "label": "After Hours",
+    })
 
+    title = (
+        f"{ticker} {previous_date} 09:30 to {chart_date} 20:00 ET - {candle_minutes} min"
+        if include_previous
+        else f"{ticker} {chart_date} 04:00 to 20:00 ET - {candle_minutes} min"
+    )
     return {
-        "title": f"{ticker} {previous_date} 09:30 to {chart_date} 20:00 ET - {candle_minutes} min",
+        "title": title,
         "candles": candles,
         "volume": volume,
         "vwap": vwap,
@@ -272,22 +287,62 @@ def afterhours_stats():
     return jsonify(result)
 
 
+@app.route("/api/intraday-stats", methods=["GET", "POST"])
+def intraday_stats():
+    payload = request.get_json(silent=True) or {}
+    ticker = normalize_ticker(payload.get("ticker") or request.args.get("ticker"))
+    if not ticker:
+        return jsonify({"error": "Ticker is required."}), 400
+
+    cache_key = make_key("intraday-runners", ticker)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    # The intraday-runners endpoint already returns anomaly sessions > 9x daily
+    # volume; keep the >= 10 floor to match the tab's original filter.
+    try:
+        results, raw_payload = fetch_all_pages("intraday-runners", ticker)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    rows = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        ratio = row.get("daily_volume_ratio")
+        if ratio is None or float(ratio) < 10:
+            continue
+        row["_chart_date"] = extract_row_date(row)
+        rows.append(row)
+
+    result = {
+        "ticker": ticker,
+        "rows": rows,
+        "raw": {"status": raw_payload.get("status"), "count": len(rows)},
+    }
+    cache_set(cache_key, result, ttl=_24_HOURS)
+    return jsonify(result)
+
+
 @app.get("/api/chart")
 def chart():
     ticker = normalize_ticker(request.args.get("ticker"))
     date_value = request.args.get("date")
     candle_minutes = int(request.args.get("candleMinutes", 3))
+    session = request.args.get("session", "default")
+    include_previous = session != "intraday"
     if not ticker or not date_value:
         return jsonify({"error": "Ticker and date are required."}), 400
 
-    cache_key = make_key("chart", ticker, date_value[:10], candle_minutes)
+    cache_key = make_key("chart", ticker, date_value[:10], candle_minutes, session)
     cached = cache_get(cache_key)
     if cached is not None:
         return jsonify(cached)
 
     try:
         chart_date = datetime.strptime(date_value[:10], "%Y-%m-%d").date()
-        payload = build_chart_payload(ticker, chart_date, candle_minutes)
+        payload = build_chart_payload(ticker, chart_date, candle_minutes, include_previous=include_previous)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 502
 

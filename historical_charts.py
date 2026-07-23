@@ -58,9 +58,11 @@ def get_intraday_data(ticker, start_date, end_date, candle_minutes=3):
         print(f"Error fetching data from Polygon API: {e}")
         return pd.DataFrame()
 
-def prepare_chart_data(ticker, chart_date, candle_minutes=3, previous_start=time(16, 0)):
+def prepare_chart_data(ticker, chart_date, candle_minutes=3, previous_start=time(16, 0), include_previous=True):
     """
-    Fetch and prepare previous-day context plus the requested chart day.
+    Fetch and prepare the requested chart day (4:00-20:00 ET), optionally with
+    previous-day context. When include_previous is False, only the selected day's
+    premarket-through-after-hours window is returned.
     """
     if isinstance(chart_date, datetime):
         chart_date = chart_date.date()
@@ -68,7 +70,8 @@ def prepare_chart_data(ticker, chart_date, candle_minutes=3, previous_start=time
     previous_date = previous_market_date(chart_date)
 
     # Fetch enough intraday data for previous after-hours and the requested date.
-    data = get_intraday_data(ticker, previous_date, chart_date, candle_minutes)
+    fetch_start = previous_date if include_previous else chart_date
+    data = get_intraday_data(ticker, fetch_start, chart_date, candle_minutes)
     if data.empty:
         print("No data to plot. Exiting.")
         return pd.DataFrame(), previous_date
@@ -82,17 +85,20 @@ def prepare_chart_data(ticker, chart_date, candle_minutes=3, previous_start=time
     data.set_index('timestamp', inplace=True)
     data.sort_index(inplace=True)
 
-    previous_day_context = (
-        (data.index.date == previous_date)
-        & (data.index.time >= previous_start)
-        & (data.index.time <= time(20, 0))
-    )
     chart_day_extended_hours = (
         (data.index.date == chart_date)
         & (data.index.time >= time(4, 0))
         & (data.index.time <= time(20, 0))
     )
-    data = data[previous_day_context | chart_day_extended_hours]
+    if include_previous:
+        previous_day_context = (
+            (data.index.date == previous_date)
+            & (data.index.time >= previous_start)
+            & (data.index.time <= time(20, 0))
+        )
+        data = data[previous_day_context | chart_day_extended_hours]
+    else:
+        data = data[chart_day_extended_hours]
     if data.empty:
         print("No data after applying extended-hours filters.")
         return pd.DataFrame(), previous_date
